@@ -1,0 +1,10 @@
+﻿.env
+.env.local
+.venv
+.venv-1
+__pycache__
+*.pyc
+node_modules
+.next
+postgres_data
+*.log

@@ -1,0 +1,63 @@
+"""
+Client for the Companies House Public Data API.
+Basic auth: API key as username, empty password.
+Retries on 5xx with exponential backoff (tenacity).
+Rate-limited via Redis token bucket.
+"""
+
+import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from app.config import settings
+from app.core.rate_limiter import acquire_ch_token
+
+CH_BASE = "https://api.company-information.service.gov.uk"
+
+
+def _is_transient(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
+class CompaniesHouseClient:
+    def __init__(self) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=CH_BASE,
+            auth=(settings.ch_api_key, ""),
+            timeout=15.0,
+        )
+
+    @retry(
+        retry=retry_if_exception(_is_transient),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        await acquire_ch_token()
+        r = await self._client.get(path, params=params)
+        r.raise_for_status()
+        return r.json()
+
+    async def search_companies(self, query: str, items_per_page: int = 20, start_index: int = 0) -> dict:
+        return await self._get("/search/companies", params={
+            "q": query,
+            "items_per_page": items_per_page,
+            "start_index": start_index,
+        })
+
+    async def get_company(self, number: str) -> dict:
+        return await self._get(f"/company/{number}")
+
+    async def get_officers(self, number: str, items_per_page: int = 100) -> dict:
+        return await self._get(f"/company/{number}/officers", params={"items_per_page": items_per_page})
+
+    async def get_pscs(self, number: str) -> dict:
+        return await self._get(f"/company/{number}/persons-with-significant-control")
+
+    async def get_filings(self, number: str, items_per_page: int = 25) -> dict:
+        return await self._get(f"/company/{number}/filing-history", params={"items_per_page": items_per_page})
+
+    async def close(self) -> None:
+        await self._client.aclose()
