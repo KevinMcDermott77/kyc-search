@@ -59,8 +59,7 @@ function ConfirmationStatementPanel({ companyNumber }: { companyNumber: string }
   }
 
   const daysSince = Math.floor(
-    (new Date().getTime() - new Date(latest.date).getTime()) / (1000 * 60 * 60 * 24)
-  );
+(new Date().getTime() - new Date(latest.date ?? 0).getTime()) / (1000 * 60 * 60 * 24)  );
   const isStale = daysSince > 365;
 
   return (
