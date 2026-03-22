@@ -30,7 +30,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 function ConfirmationStatementSummary({ filings }: { filings: Filing[] }) {
   const statements = filings
     .filter(f => f.category === 'confirmation-statement')
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => new Date(b.date ?? 0).getTime() - new Date(a.date ?? 0).getTime());
 
   if (statements.length === 0) return null;
 
