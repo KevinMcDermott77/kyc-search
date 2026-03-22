@@ -36,8 +36,7 @@ function ConfirmationStatementSummary({ filings }: { filings: Filing[] }) {
 
   const latest = statements[0];
   const daysSince = Math.floor(
-    (new Date().getTime() - new Date(latest.date).getTime()) / (1000 * 60 * 60 * 24)
-  );
+(new Date().getTime() - new Date(latest.date ?? 0).getTime()) / (1000 * 60 * 60 * 24)  );
   const isStale = daysSince > 365;
 
   return (
