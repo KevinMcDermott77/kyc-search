@@ -119,6 +119,27 @@ function OverviewTab({ company }: { company: CompanyDetail }) {
           </div>
         </InfoCard>
       )}
+
+      <InfoCard title="Incorporation Documents">
+        <div className="space-y-2 text-sm">
+          <a
+            href={`https://find-and-update.company-information.service.gov.uk/company/${company.company_number}/filing-history?type=incorporation`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-brand-600 hover:underline"
+          >
+            View incorporation filing on Companies House
+          </a>
+          <a
+            href={`https://find-and-update.company-information.service.gov.uk/company/${company.company_number}/filing-history`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-brand-600 hover:underline"
+          >
+            Full filing history
+          </a>
+        </div>
+      </InfoCard>
     </div>
   );
 }
