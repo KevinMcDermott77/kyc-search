@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 
 class AddressOut(BaseModel):
@@ -96,3 +96,12 @@ class FilingOut(BaseModel):
     document_url: str | None
 
     model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def links(self) -> dict | None:
+        """Mirrors CH's links shape so callers can check document availability
+        the same way they would against the raw Companies House response."""
+        if not self.document_url:
+            return None
+        return {"document_metadata": self.document_url}

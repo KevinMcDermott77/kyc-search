@@ -124,7 +124,10 @@ async def get_filing_document(
     current_user: User = Depends(get_current_user),
 ):
     """Proxy the CH document API to download a filing PDF."""
-    pdf_bytes = await ch.get_filing_document(transaction_id)
+    try:
+        pdf_bytes = await ch.get_filing_document(number, transaction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

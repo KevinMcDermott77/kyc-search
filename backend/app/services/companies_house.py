@@ -66,10 +66,21 @@ class CompaniesHouseClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    async def get_filing_document(self, transaction_id: str) -> bytes:
+    async def get_filing_document(self, number: str, transaction_id: str) -> bytes:
+        # transaction_id is not a valid document-api ID — look up the filing first
+        # to read links.document_metadata, which embeds the actual document ID.
         await acquire_ch_token()
-        url = f"{CH_DOCUMENT_BASE}/document/{transaction_id}/content"
-        r = await self._client.get(url, follow_redirects=True)
+        meta_response = await self._client.get(f"/company/{number}/filing-history/{transaction_id}")
+        meta_response.raise_for_status()
+        document_metadata_url = (meta_response.json().get("links") or {}).get("document_metadata")
+        if not document_metadata_url:
+            raise ValueError(f"Filing {transaction_id} has no document available")
+
+        doc_id = document_metadata_url.rstrip("/").rsplit("/", 1)[-1]
+
+        await acquire_ch_token()
+        content_url = f"{CH_DOCUMENT_BASE}/document/{doc_id}/content"
+        r = await self._client.get(content_url, follow_redirects=True)
         r.raise_for_status()
         return r.content
 
