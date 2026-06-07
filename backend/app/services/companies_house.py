@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.rate_limiter import acquire_ch_token
 
 CH_BASE = "https://api.company-information.service.gov.uk"
+CH_DOCUMENT_BASE = "https://document-api.company-information.service.gov.uk"
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -58,6 +59,19 @@ class CompaniesHouseClient:
 
     async def get_filings(self, number: str, items_per_page: int = 25) -> dict:
         return await self._get(f"/company/{number}/filing-history", params={"items_per_page": items_per_page})
+
+    @retry(
+        retry=retry_if_exception(_is_transient),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+    async def get_filing_document(self, transaction_id: str) -> bytes:
+        await acquire_ch_token()
+        url = f"{CH_DOCUMENT_BASE}/document/{transaction_id}/content"
+        r = await self._client.get(url, follow_redirects=True)
+        r.raise_for_status()
+        return r.content
 
     async def close(self) -> None:
         await self._client.aclose()

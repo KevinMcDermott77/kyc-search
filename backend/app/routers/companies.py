@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,3 +114,19 @@ async def get_filings(
         await db.commit()
 
     return filings
+
+
+@router.get("/{number}/filings/{transaction_id}/document")
+async def get_filing_document(
+    number: str,
+    transaction_id: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Proxy the CH document API to download a filing PDF."""
+    pdf_bytes = await ch.get_filing_document(transaction_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={transaction_id}.pdf"},
+    )
