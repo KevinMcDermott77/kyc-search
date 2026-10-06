@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +14,12 @@ from app.services.risk_flags import compute_risk_flags
 router = APIRouter(prefix="/companies", tags=["companies"])
 
 CACHE_TTL_SECONDS = 3600  # Re-fetch from CH after 1 hour
+STORED_LIST_TTL = timedelta(hours=24)  # Officers / PSCs are refetched after 24 hours
+PAGINATED_SINCE = datetime.now(timezone.utc)  # see _needs_refetch
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 async def _get_or_fetch_company(
@@ -20,15 +28,13 @@ async def _get_or_fetch_company(
     ch,
     user_id: int,
 ) -> Company:
-    from datetime import datetime, timezone, timedelta
-
     result = await db.execute(select(Company).where(Company.company_number == number))
     company = result.scalar_one_or_none()
 
     stale = (
         company is None
         or company.last_full_fetch is None
-        or (datetime.now(timezone.utc) - company.last_full_fetch) > timedelta(seconds=CACHE_TTL_SECONDS)
+        or (datetime.now(timezone.utc) - _as_utc(company.last_full_fetch)) > timedelta(seconds=CACHE_TTL_SECONDS)
     )
 
     if stale:
@@ -52,9 +58,28 @@ async def get_company(
     return company
 
 
+def _stored_fetched_at(rows: list[Officer] | list[Psc]) -> datetime | None:
+    """When the stored set was fetched: the oldest row's cached_at (rows are replaced as a set)."""
+    if not rows:
+        return None
+    return min(_as_utc(row.cached_at) for row in rows)
+
+
+def _needs_refetch(fetched_at: datetime | None, fresh: bool) -> bool:
+    if fresh or fetched_at is None:
+        return True
+    # Rows written before this process started may come from the pre-pagination
+    # client (first page only), so they are refetched once.
+    if fetched_at < PAGINATED_SINCE:
+        return True
+    return datetime.now(timezone.utc) - fetched_at > STORED_LIST_TTL
+
+
 @router.get("/{number}/officers", response_model=list[OfficerOut])
 async def get_officers(
     number: str,
+    response: Response,
+    fresh: bool = Query(False, description="Always fetch live from Companies House"),
     db: AsyncSession = Depends(get_db),
     ch=Depends(get_ch_client),
     current_user: User = Depends(get_current_user),
@@ -63,9 +88,11 @@ async def get_officers(
 
     result = await db.execute(select(Officer).where(Officer.company_id == company.id))
     officers = list(result.scalars().all())
+    fetched_at = _stored_fetched_at(officers)
 
-    if not officers:
+    if _needs_refetch(fetched_at, fresh):
         raw = await ch.get_officers(number)
+        fetched_at = datetime.now(timezone.utc)
         officers = await ingestion.ingest_officers(db, company, raw.get("items") or [], source="companies_house", user_id=current_user.id)
         # Update risk flags with officer data
         psc_result = await db.execute(select(Psc).where(Psc.company_id == company.id))
@@ -73,12 +100,15 @@ async def get_officers(
         company.risk_flags = compute_risk_flags(company, officers, pscs)
         await db.commit()
 
+    response.headers["X-Fetched-At"] = fetched_at.isoformat()
     return officers
 
 
 @router.get("/{number}/pscs", response_model=list[PscOut])
 async def get_pscs(
     number: str,
+    response: Response,
+    fresh: bool = Query(False, description="Always fetch live from Companies House"),
     db: AsyncSession = Depends(get_db),
     ch=Depends(get_ch_client),
     current_user: User = Depends(get_current_user),
@@ -87,12 +117,15 @@ async def get_pscs(
 
     result = await db.execute(select(Psc).where(Psc.company_id == company.id))
     pscs = list(result.scalars().all())
+    fetched_at = _stored_fetched_at(pscs)
 
-    if not pscs:
+    if _needs_refetch(fetched_at, fresh):
         raw = await ch.get_pscs(number)
+        fetched_at = datetime.now(timezone.utc)
         pscs = await ingestion.ingest_pscs(db, company, raw.get("items") or [], source="companies_house", user_id=current_user.id)
         await db.commit()
 
+    response.headers["X-Fetched-At"] = fetched_at.isoformat()
     return pscs
 
 

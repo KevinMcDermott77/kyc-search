@@ -55,6 +55,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Fetched-At", "Retry-After"],
 )
 
 app.include_router(auth.router)
