@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from app.config import settings
@@ -11,6 +12,7 @@ from app.db.session import AsyncSessionLocal, engine
 from app.models import User  # noqa: F401
 from app.models import AuditLog, Case, CaseNote, Company, Filing, Officer, Psc  # noqa: F401
 from app.routers import admin, audit, auth, cases, companies, ownership, screening, search
+from app.services.companies_house import CompaniesHouseError
 
 
 async def _seed_admin() -> None:
@@ -63,6 +65,19 @@ app.include_router(screening.router)
 app.include_router(cases.router)
 app.include_router(audit.router)
 app.include_router(admin.router)
+
+
+@app.exception_handler(CompaniesHouseError)
+async def companies_house_error_handler(request: Request, exc: CompaniesHouseError) -> JSONResponse:
+    # CH rate limiting is our capacity problem, not the caller's: surface as 503 + Retry-After.
+    if exc.status_code == 429:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Companies House rate limit reached, retry later"},
+            headers={"Retry-After": str(exc.retry_after or 60)},
+        )
+    detail = "Not found at Companies House" if exc.status_code == 404 else "Companies House request failed"
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail})
 
 
 @app.get("/health")

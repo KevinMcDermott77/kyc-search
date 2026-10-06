@@ -96,6 +96,26 @@ async def get_pscs(
     return pscs
 
 
+@router.get("/{number}/pscs/statements")
+async def get_psc_statements(
+    number: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Proxy CH persons-with-significant-control-statements (all pages)."""
+    return await ch.get_psc_statements(number)
+
+
+@router.get("/{number}/exemptions")
+async def get_exemptions(
+    number: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Proxy CH PSC exemptions."""
+    return await ch.get_exemptions(number)
+
+
 @router.get("/{number}/filings", response_model=list[FilingOut])
 async def get_filings(
     number: str,

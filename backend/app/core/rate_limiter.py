@@ -1,67 +1,76 @@
 """
-Token-bucket rate limiter for Companies House API (600 req / 5 min).
-Implemented as a Redis Lua script for atomicity.
+In-process token-bucket rate limiter for the Companies House API.
+
+CH allows 600 requests per 5 minutes; we cap ourselves at 500 to leave headroom.
+The bucket also honours CH's own X-Ratelimit-Remaining / X-Ratelimit-Reset headers,
+so if CH reports fewer remaining requests than we think we have, we trust CH.
+
+The service runs as a single uvicorn process, so an in-process bucket shared by
+the single CompaniesHouseClient instance is sufficient.
 """
 
 import asyncio
+import time
 
-import redis.asyncio as aioredis
-
-from app.config import settings
-
-# 600 requests per 5-minute window (300 seconds)
-CH_CAPACITY = 600
-CH_REFILL_RATE = 600 / 300  # tokens per second
-CH_WINDOW = 300
-
-# Lua script: token-bucket (atomic)
-_LUA_SCRIPT = """
-local key = KEYS[1]
-local capacity = tonumber(ARGV[1])
-local rate = tonumber(ARGV[2])  -- tokens per second
-local now = tonumber(ARGV[3])   -- unix timestamp (float)
-local requested = tonumber(ARGV[4])
-
-local bucket = redis.call('HMGET', key, 'tokens', 'ts')
-local tokens = tonumber(bucket[1]) or capacity
-local ts = tonumber(bucket[2]) or now
-
--- refill
-local delta = math.max(0, now - ts)
-tokens = math.min(capacity, tokens + delta * rate)
-
-if tokens < requested then
-    return 0
-end
-
-tokens = tokens - requested
-redis.call('HMSET', key, 'tokens', tokens, 'ts', now)
-redis.call('EXPIRE', key, 600)
-return 1
-"""
-
-_redis: aioredis.Redis | None = None
-_script: object | None = None
+CH_CAPACITY = 500
+CH_WINDOW = 300  # seconds
+CH_REFILL_RATE = CH_CAPACITY / CH_WINDOW  # tokens per second
 
 
-async def _get_redis() -> aioredis.Redis:
-    global _redis, _script
-    if _redis is None:
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-        _script = _redis.register_script(_LUA_SCRIPT)
-    return _redis
+class TokenBucket:
+    def __init__(
+        self,
+        capacity: int = CH_CAPACITY,
+        refill_rate: float = CH_REFILL_RATE,
+        clock=time.monotonic,
+    ) -> None:
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self._clock = clock
+        self._tokens = float(capacity)
+        self._ts = clock()
+        self._blocked_until = 0.0  # monotonic time before which no requests may go out
+        self._lock = asyncio.Lock()
 
+    def _refill(self) -> None:
+        now = self._clock()
+        self._tokens = min(self.capacity, self._tokens + (now - self._ts) * self.refill_rate)
+        self._ts = now
 
-async def acquire_ch_token() -> None:
-    """Block until a Companies House API token is available."""
-    import time
-    r = await _get_redis()
-    while True:
-        now = time.time()
-        allowed = await _script(  # type: ignore[misc]
-            keys=["ch_rate_bucket"],
-            args=[CH_CAPACITY, CH_REFILL_RATE, now, 1],
-        )
-        if allowed:
+    async def acquire(self) -> None:
+        """Block until a token is available, then take it."""
+        async with self._lock:
+            while True:
+                now = self._clock()
+                if now < self._blocked_until:
+                    await asyncio.sleep(self._blocked_until - now)
+                    continue
+                self._refill()
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                await asyncio.sleep((1 - self._tokens) / self.refill_rate)
+
+    def update_from_headers(self, headers) -> None:
+        """Reconcile with CH's view of the rate limit window."""
+        remaining = headers.get("X-Ratelimit-Remaining")
+        if remaining is None:
             return
-        await asyncio.sleep(0.5)
+        try:
+            remaining_n = int(remaining)
+        except ValueError:
+            return
+        self._refill()
+        self._tokens = min(self._tokens, float(max(remaining_n, 0)))
+        if remaining_n <= 0:
+            self._blocked_until = self._clock() + seconds_until_reset(headers.get("X-Ratelimit-Reset"))
+
+
+def seconds_until_reset(reset_header: str | None) -> float:
+    """X-Ratelimit-Reset is a unix timestamp; fall back to a full window if absent/invalid."""
+    if reset_header:
+        try:
+            return max(0.0, min(float(reset_header) - time.time(), CH_WINDOW))
+        except ValueError:
+            pass
+    return float(CH_WINDOW)

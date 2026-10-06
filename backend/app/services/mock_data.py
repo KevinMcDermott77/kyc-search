@@ -189,6 +189,12 @@ class MockCompaniesHouseClient:
         items = MOCK_PSCS.get(number, [])
         return {"items": items, "total_results": len(items)}
 
+    async def get_psc_statements(self, number: str) -> dict:
+        return {"items": [], "total_results": 0}
+
+    async def get_exemptions(self, number: str) -> dict:
+        return {"kind": "exemptions", "exemptions": {}}
+
     async def get_filings(self, number: str, items_per_page: int = 25) -> dict:
         items = MOCK_FILINGS.get(number, [])
         return {"items": items, "total_results": len(items)}
