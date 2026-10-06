@@ -1,7 +1,10 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -10,6 +13,8 @@ from app.models import Company, Filing, Officer, Psc, User
 from app.schemas.company import CompanyOut, FilingOut, OfficerOut, PscOut
 from app.services import ingestion
 from app.services.risk_flags import compute_risk_flags
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -40,8 +45,16 @@ async def _get_or_fetch_company(
     if stale:
         raw = await ch.get_company(number)
         source = "mock" if hasattr(ch, "_is_mock") else "companies_house"
-        company = await ingestion.ingest_company(db, raw, source=source, user_id=user_id)
-        await db.commit()
+        try:
+            company = await ingestion.ingest_company(db, raw, source=source, user_id=user_id)
+            await db.commit()
+        except IntegrityError:
+            # A concurrent request (e.g. /officers and /pscs fired together) inserted
+            # this company first; its row is as fresh as ours, so use it.
+            logger.info("Concurrent insert of company %s, reusing stored row", number)
+            await db.rollback()
+            result = await db.execute(select(Company).where(Company.company_number == number))
+            return result.scalar_one()
         await db.refresh(company)
 
     return company
@@ -127,6 +140,18 @@ async def get_pscs(
 
     response.headers["X-Fetched-At"] = fetched_at.isoformat()
     return pscs
+
+
+@router.get("/{number}/pscs/raw")
+async def get_pscs_raw(
+    number: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Companies House's PSC list as CH sends it (all pages merged), always live, never stored."""
+    raw = await ch.get_pscs(number)
+    fetched_at = datetime.now(timezone.utc)
+    return JSONResponse(content=raw, headers={"X-Fetched-At": fetched_at.isoformat()})
 
 
 @router.get("/{number}/pscs/statements")

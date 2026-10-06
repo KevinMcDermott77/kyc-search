@@ -2,24 +2,16 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
-from app.db.base import Base
-from app.db.session import get_db
-from app.dependencies import get_ch_client, get_current_user
-from app.main import app
 from app.models import Company, Officer, Psc
 from app.routers import companies
+from tests.conftest import NOW
 
 NUM = "01234567"
-NOW = datetime.now(timezone.utc)
 
 KINDS = {
     "officers": dict(
@@ -38,37 +30,6 @@ KINDS = {
         live_name="LIVE PSC",
     ),
 }
-
-
-@pytest.fixture
-def sessionmaker(tmp_path):
-    # NullPool: the seeding loop and the TestClient loop must not share connections.
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", poolclass=NullPool)
-
-    async def create():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(create())
-    return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-
-@pytest.fixture
-def db_api(sessionmaker, ch, monkeypatch):
-    # Default: this process "started" long ago, so only the 24h rule applies.
-    monkeypatch.setattr(companies, "PAGINATED_SINCE", NOW - timedelta(days=30))
-
-    async def override_db():
-        async with sessionmaker() as session:
-            yield session
-
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_ch_client] = lambda: ch
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
-    try:
-        yield TestClient(app)
-    finally:
-        app.dependency_overrides.clear()
 
 
 def seed(sessionmaker, kind: str, cached_at: datetime) -> None:
@@ -169,3 +130,28 @@ def test_statements_and_exemptions_are_always_live(db_api, sessionmaker, ch_mock
     for _ in range(2):
         assert db_api.get(f"/companies/{NUM}/{path}").status_code == 200
     assert route.call_count == 2
+
+
+def test_pscs_response_shape_unchanged_by_raw_endpoint(db_api, sessionmaker, ch_mock):
+    """/pscs stays the flattened PscOut list even though /pscs/raw now exists."""
+    seed(sessionmaker, "pscs", NOW - timedelta(hours=25))
+    ch_mock.get(KINDS["pscs"]["ch_path"]).respond(200, json={
+        "items": [{
+            "name": "HOLDCO LIMITED",
+            "kind": "corporate-entity-person-with-significant-control",
+            "identification": {"registration_number": "07654321", "legal_form": "Limited"},
+            "natures_of_control": ["ownership-of-shares-75-to-100-percent"],
+        }],
+        "total_results": 1, "active_count": 1, "ceased_count": 0,
+    })
+
+    r = db_api.get(f"/companies/{NUM}/pscs")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert set(body[0]) == {
+        "id", "name", "kind", "linked_company_number", "natures_of_control", "notified_on",
+        "ceased_on", "birth_month", "birth_year", "nationality", "country_of_residence",
+    }
+    assert body[0]["linked_company_number"] == "07654321"

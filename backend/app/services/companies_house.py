@@ -10,6 +10,7 @@ instance). Every request goes through _request(), which:
   - raises CompaniesHouseError (never containing the API key) for any non-2xx outcome.
 """
 
+import logging
 import math
 
 import httpx
@@ -17,6 +18,8 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 
 from app.config import settings
 from app.core.rate_limiter import TokenBucket, seconds_until_reset
+
+logger = logging.getLogger(__name__)
 
 CH_BASE = "https://api.company-information.service.gov.uk"
 CH_DOCUMENT_BASE = "https://document-api.company-information.service.gov.uk"
@@ -77,10 +80,14 @@ class CompaniesHouseClient:
                     if r.status_code >= 500:
                         raise _TransientError(r)
         except _TransientError as exc:
+            logger.warning("Companies House returned %s after retries", exc.response.status_code)
             raise CompaniesHouseError(exc.response.status_code) from None
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
+            logger.warning("Companies House request timed out: %s", type(exc).__name__)
             raise CompaniesHouseError(504) from None
-        except httpx.TransportError:
+        except httpx.HTTPError as exc:
+            # Transport failures (after retries) and anything else httpx raises, e.g. decoding errors.
+            logger.warning("Companies House request failed: %s", type(exc).__name__)
             raise CompaniesHouseError(502) from None
 
         if r.status_code == 429:
@@ -90,7 +97,13 @@ class CompaniesHouseClient:
         return r
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        return (await self._request(path, params=params)).json()
+        r = await self._request(path, params=params)
+        try:
+            return r.json()
+        except ValueError as exc:
+            # CH occasionally answers 200 with an HTML maintenance page.
+            logger.warning("Companies House returned an unreadable body: %s", type(exc).__name__)
+            raise CompaniesHouseError(502) from None
 
     async def _get_all_pages(self, path: str) -> dict:
         """Page through a CH list endpoint until total_results items have been collected."""
