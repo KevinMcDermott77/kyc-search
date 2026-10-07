@@ -85,8 +85,9 @@ async def companies_house_error_handler(request: Request, exc: CompaniesHouseErr
     if exc.status_code == 404:
         return JSONResponse(status_code=404, content={"detail": "Not found at Companies House"})
     # An upstream 5xx is a gateway failure on our side: never surface it as our own 500.
+    # A CH 401/403 means our API key is rejected: also our fault, not the caller's.
     status_code = exc.status_code
-    if status_code >= 500 and status_code not in (503, 504):
+    if status_code in (401, 403) or (status_code >= 500 and status_code not in (503, 504)):
         status_code = 502
     return JSONResponse(status_code=status_code, content={"detail": "Companies House request failed"})
 

@@ -60,6 +60,30 @@ async def _get_or_fetch_company(
     return company
 
 
+@router.get("/{number}/raw")
+async def get_company_raw(
+    number: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Companies House's company profile as CH sends it, always live, never stored."""
+    raw = await ch.get_company(number)
+    fetched_at = datetime.now(timezone.utc)
+    return JSONResponse(content=raw, headers={"X-Fetched-At": fetched_at.isoformat()})
+
+
+@router.get("/{number}/officers/raw")
+async def get_officers_raw(
+    number: str,
+    ch=Depends(get_ch_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Companies House's officer list as CH sends it (all pages merged), always live, never stored."""
+    raw = await ch.get_officers(number)
+    fetched_at = datetime.now(timezone.utc)
+    return JSONResponse(content=raw, headers={"X-Fetched-At": fetched_at.isoformat()})
+
+
 @router.get("/{number}", response_model=CompanyOut)
 async def get_company(
     number: str,
